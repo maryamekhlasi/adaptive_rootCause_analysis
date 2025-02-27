@@ -1,4 +1,5 @@
-# adaptive_rootCause_analysis
+# Adaptive_rootCause_analysis
+https://lttng.org/docs/v2.13/#doc-trigger-event-notif
 ## Prerequisites
 
 - Ensure you have the following installed on your system:
@@ -41,7 +42,7 @@ lttng add-trigger --name=sched-switch-notif3 \
 Initialize and Start the Tracing Session
 
 ```
-lttng create my-session  
+lttng create my-session --output="your direct location"  
 lttng enable-event --userspace --all
 
 lttng enable-event -c kernelchannel -k sched_switch,sched_waking,sched_pi_setprio,sched_process_fork,sched_process_exit,sched_process_free,sched_wakeup,\
