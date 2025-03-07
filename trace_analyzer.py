@@ -29,6 +29,173 @@ class TraceAnalyzer:
         self.all_traces_info = {}
         self.turning_factor = 1.3  # n parameter from the formula
 
+    def create_partitioned_matrix(self, output_file="partitioned_matrix.txt", abnormal_only=False):
+        """
+        Create a partitioned matrix A = [[Aoo][Aot][Ato][0]] where:
+        - Aoo: transitions between operations
+        - Aot: transitions from operations to traces
+        - Ato: transitions from traces to operations
+        """
+        # Get operation transitions (Aoo)
+        operation_transitions = self.calculate_transition_probabilities(abnormal_only)
+        
+        # Get all unique operations and traces
+        operations = set()
+        traces = set()
+        
+        # If abnormal_only is True, only consider abnormal traces
+        if abnormal_only:
+            traces = {trace['trace_name'] for trace in self.abnormal_traces}
+        else:
+            traces = set(self.all_traces_info.keys())
+        
+        for analysis in self.all_traces_info.values():
+            for span in analysis['critical_path']:
+                operations.add(span['operation_name'])
+        
+        operations = sorted(list(operations))
+        traces = sorted(list(traces))
+        
+        # Create Aot (Operations to Traces) and Ato (Traces to Operations)
+        Aot = defaultdict(lambda: defaultdict(float))
+        Ato = defaultdict(lambda: defaultdict(float))
+        
+        # Calculate Ato and Aot
+        for trace_name, analysis in self.all_traces_info.items():
+            # Skip if we're only looking at abnormal traces and this one isn't abnormal
+            if abnormal_only:
+                is_abnormal = False
+                for abnormal_trace in self.abnormal_traces:
+                    if abnormal_trace['trace_name'] == trace_name:
+                        is_abnormal = True
+                        break
+                if not is_abnormal:
+                    continue
+
+            trace_operations = set()
+            for span in analysis['critical_path']:
+                op_name = span['operation_name']
+                trace_operations.add(op_name)
+                
+            # For each operation in the trace, add transition from trace to operation
+            for op_name in trace_operations:
+                Ato[trace_name][op_name] = 1.0 / len(trace_operations)
+                Aot[op_name][trace_name] = 1.0 / len(traces)  # Uniform distribution to traces
+        
+        # Write the partitioned matrix to file
+        with open(output_file, 'w') as f:
+            # Write header
+            f.write("Partitioned Transition Matrix\n")
+            if abnormal_only:
+                f.write("(Abnormal Traces Only)\n")
+            f.write("=" * 50 + "\n\n")
+            
+            # Write Aoo (Operation to Operation)
+            f.write("Aoo (Operation to Operation transitions):\n")
+            f.write("-" * 40 + "\n")
+            for op1 in operations:
+                for op2 in operations:
+                    prob = operation_transitions.get(op1, {}).get(op2, 0.0)
+                    if prob > 0:
+                        f.write(f"{op1} -> {op2}: {prob:.3f}\n")
+            f.write("\n")
+            
+            # Write Aot (Operation to Trace)
+            f.write("Aot (Operation to Trace transitions):\n")
+            f.write("-" * 40 + "\n")
+            for op in operations:
+                for trace in traces:
+                    prob = Aot[op][trace]
+                    if prob > 0:
+                        f.write(f"{op} -> {trace}: {prob:.3f}\n")
+            f.write("\n")
+            
+            # Write Ato (Trace to Operation)
+            f.write("Ato (Trace to Operation transitions):\n")
+            f.write("-" * 40 + "\n")
+            for trace in traces:
+                for op in operations:
+                    prob = Ato[trace][op]
+                    if prob > 0:
+                        f.write(f"{trace} -> {op}: {prob:.3f}\n")
+            f.write("\n")
+            
+            # Note about zero matrix
+            f.write("Note: The bottom-right quadrant (Trace to Trace) is a zero matrix\n")
+
+        # Return the matrices for potential further analysis
+        return {
+            'Aoo': operation_transitions,
+            'Aot': dict(Aot),
+            'Ato': dict(Ato)
+        }
+
+    def calculate_transition_probabilities(self, abnormal_only=False) -> Dict[str, Dict[str, float]]:
+        """Calculate transition probabilities between operations in critical paths."""
+        # Count transitions between operations
+        transitions = defaultdict(lambda: defaultdict(int))
+        outgoing_counts = defaultdict(int)
+
+        # Analyze each trace's critical path
+        for trace_name, analysis in self.all_traces_info.items():
+            # Skip if we're only looking at abnormal traces and this one isn't abnormal
+            if abnormal_only:
+                is_abnormal = False
+                for abnormal_trace in self.abnormal_traces:
+                    if abnormal_trace['trace_name'] == trace_name:
+                        is_abnormal = True
+                        break
+                if not is_abnormal:
+                    continue
+
+            critical_path = analysis['critical_path']
+            
+            # Look at consecutive pairs of operations in the critical path
+            for i in range(len(critical_path) - 1):
+                current_op = critical_path[i]['operation_name']
+                next_op = critical_path[i + 1]['operation_name']
+                
+                transitions[current_op][next_op] += 1
+                outgoing_counts[current_op] += 1
+
+        # Calculate probabilities
+        probabilities = {}
+        for source_op in transitions:
+            probabilities[source_op] = {}
+            for target_op in transitions[source_op]:
+                # Calculate probability as 1/O(s) where O(s) is the number of outgoing edges
+                probabilities[source_op][target_op] = 1.0 / outgoing_counts[source_op]
+
+        return probabilities
+
+    def print_transition_matrix(self, output_file="transition_matrix.txt", abnormal_only=False):
+        """Print the transition probability matrix to a file."""
+        probabilities = self.calculate_transition_probabilities(abnormal_only)
+        
+        # Get all unique operation names
+        operations = set()
+        for source_op in probabilities:
+            operations.add(source_op)
+            for target_op in probabilities[source_op]:
+                operations.add(target_op)
+        operations = sorted(list(operations))
+
+        with open(output_file, 'w') as f:
+            # Write header
+            f.write("Source Operation -> Target Operation: Probability\n")
+            if abnormal_only:
+                f.write("(Abnormal Traces Only)\n")
+            f.write("-" * 50 + "\n\n")
+
+            # Write probabilities
+            for source_op in operations:
+                if source_op in probabilities:
+                    for target_op in operations:
+                        prob = probabilities[source_op].get(target_op, 0.0)
+                        if prob > 0:
+                            f.write(f"{source_op} -> {target_op}: {prob:.3f}\n")
+                    f.write("\n")
+
     def calculate_operation_statistics(self, operation_name: str) -> Tuple[float, float]:
         """Calculate mean and standard deviation of self time for an operation across all traces"""
         self_times = []
@@ -83,6 +250,7 @@ class TraceAnalyzer:
     def write_critical_paths_to_file(self, output_file="critical_paths.txt"):
         """Write critical paths to a file, grouping similar paths together and including expected and actual latencies"""
         groups = self.group_similar_critical_paths()
+        abnormal_traces = []  # List to store abnormal trace information
         
         with open(output_file, 'w') as f:
             for group_id, (signature, group_data) in enumerate(groups.items(), 1):
@@ -90,9 +258,55 @@ class TraceAnalyzer:
                 f.write(f"critical_path: {signature}\n")
                 f.write(f"expected_latency: {group_data['expected_latency']:.2f}ms\n")
                 f.write("actual_latencies:\n")
+                
+                # Check for abnormal traces in this group
+                group_abnormal_traces = []
                 for trace_name, latency in group_data['actual_latencies'].items():
-                    f.write(f"  {trace_name}: {latency:.2f}ms\n")
+                    is_abnormal = latency > group_data['expected_latency']
+                    status = "ABNORMAL" if is_abnormal else "normal"
+                    f.write(f"  {trace_name}: {latency:.2f}ms [{status}]\n")
+                    
+                    if is_abnormal:
+                        group_abnormal_traces.append({
+                            'trace_name': trace_name,
+                            'expected_latency': group_data['expected_latency'],
+                            'actual_latency': latency,
+                            'difference': latency - group_data['expected_latency'],
+                            'group_id': group_id,
+                            'critical_path': signature
+                        })
+                
+                if group_abnormal_traces:
+                    f.write("\nAbnormal traces in this group:\n")
+                    for trace in group_abnormal_traces:
+                        f.write(f"  - {trace['trace_name']}: {trace['difference']:.2f}ms above expected\n")
+                    abnormal_traces.extend(group_abnormal_traces)
+                
                 f.write("\n")
+        
+        # Write a summary of all abnormal traces at the end of the file
+        if abnormal_traces:
+            with open(output_file, 'a') as f:
+                f.write("\n" + "="*50 + "\n")
+                f.write("SUMMARY OF ABNORMAL TRACES\n")
+                f.write("="*50 + "\n\n")
+                f.write(f"Total number of abnormal traces: {len(abnormal_traces)}\n\n")
+                
+                # Sort abnormal traces by the difference between actual and expected latency
+                abnormal_traces.sort(key=lambda x: x['difference'], reverse=True)
+                
+                for trace in abnormal_traces:
+                    f.write(f"Trace: {trace['trace_name']}\n")
+                    f.write(f"Group: {trace['group_id']}\n")
+                    f.write(f"Critical Path: {trace['critical_path']}\n")
+                    f.write(f"Expected Latency: {trace['expected_latency']:.2f}ms\n")
+                    f.write(f"Actual Latency: {trace['actual_latency']:.2f}ms\n")
+                    f.write(f"Excess Latency: {trace['difference']:.2f}ms\n")
+                    f.write("-"*40 + "\n")
+        
+        # Store abnormal traces as a property of the class
+        self.abnormal_traces = abnormal_traces
+        return abnormal_traces
 
     def read_json_file(self, file_path):
         """Read and parse a single JSON file."""
@@ -305,14 +519,220 @@ class TraceAnalyzer:
             durations[trace_name] = duration_ms
         return durations
 
+    def identify_high_latency_traces(self, output_file="high_latency_traces.txt"):
+        """Identify and write traces where actual latency exceeds expected latency."""
+        groups = self.group_similar_critical_paths()
+        high_latency_traces = []
+        
+        for signature, group_data in groups.items():
+            expected_latency = group_data['expected_latency']
+            for trace_name, actual_latency in group_data['actual_latencies'].items():
+                if actual_latency > expected_latency:
+                    high_latency_traces.append({
+                        'trace_name': trace_name,
+                        'expected_latency': expected_latency,
+                        'actual_latency': actual_latency,
+                        'difference': actual_latency - expected_latency,
+                        'critical_path': signature
+                    })
+        
+        # Sort by the difference between actual and expected latency
+        high_latency_traces.sort(key=lambda x: x['difference'], reverse=True)
+        
+        # Write results to file
+        with open(output_file, 'w') as f:
+            f.write("Traces with Actual Latency > Expected Latency\n")
+            f.write("=" * 50 + "\n\n")
+            
+            if not high_latency_traces:
+                f.write("No traces found where actual latency exceeds expected latency.\n")
+            else:
+                for trace in high_latency_traces:
+                    f.write(f"Trace: {trace['trace_name']}\n")
+                    f.write(f"Critical Path: {trace['critical_path']}\n")
+                    f.write(f"Expected Latency: {trace['expected_latency']:.2f}ms\n")
+                    f.write(f"Actual Latency: {trace['actual_latency']:.2f}ms\n")
+                    f.write(f"Difference: {trace['difference']:.2f}ms\n")
+                    f.write("-" * 50 + "\n\n")
+        
+        return high_latency_traces
+
+    def calculate_node_ranks(self, damping_factor=0.85, epsilon=1e-8, max_iterations=100):
+        """
+        Calculate node ranks using the equation: v(q) = d·Av(q−1) + (1−d)·u
+        with initial v = [Vo^T, Vt^T]^T where:
+        - Vo = [1/No, 1/No, ...] (No is number of operations)
+        - Vt = [1/Nt, 1/Nt, ...] (Nt is number of traces)
+        
+        The transition matrix A is calculated as [Aoo,Aot;Ato,0] where:
+        Ast = 1/|O(s)| for t ∈ O(s), 0 otherwise
+        """
+        # Get all nodes (operations and traces)
+        operations = set()
+        traces = set(self.all_traces_info.keys())
+        
+        for analysis in self.all_traces_info.values():
+            for span in analysis['critical_path']:
+                operations.add(span['operation_name'])
+        
+        operations = sorted(list(operations))
+        traces = sorted(list(traces))
+        
+        No = len(operations)  # Number of operations
+        Nt = len(traces)     # Number of traces
+        n = No + Nt         # Total number of nodes
+        
+        # Create the complete transition matrix A
+        A = np.zeros((n, n))
+        node_to_index = {node: i for i, node in enumerate(operations + traces)}
+        
+        # Calculate outgoing edges for each operation
+        op_outgoing_edges = {}
+        for op in operations:
+            outgoing = set()
+            # Count edges to other operations
+            for analysis in self.all_traces_info.values():
+                for i, span in enumerate(analysis['critical_path']):
+                    if span['operation_name'] == op and i < len(analysis['critical_path']) - 1:
+                        outgoing.add(analysis['critical_path'][i + 1]['operation_name'])
+            # Count edges to traces
+            for trace, analysis in self.all_traces_info.items():
+                if any(span['operation_name'] == op for span in analysis['critical_path']):
+                    outgoing.add(trace)
+            op_outgoing_edges[op] = len(outgoing)
+        
+        # Calculate outgoing edges for each trace
+        trace_outgoing_edges = {}
+        for trace in traces:
+            outgoing = set()
+            analysis = self.all_traces_info[trace]
+            for span in analysis['critical_path']:
+                outgoing.add(span['operation_name'])
+            trace_outgoing_edges[trace] = len(outgoing)
+        
+        # Fill Aoo (Operation to Operation)
+        for op1 in operations:
+            i = node_to_index[op1]
+            num_outgoing = op_outgoing_edges[op1]
+            if num_outgoing > 0:
+                prob = 1.0 / num_outgoing
+                for analysis in self.all_traces_info.values():
+                    for j, span in enumerate(analysis['critical_path']):
+                        if span['operation_name'] == op1 and j < len(analysis['critical_path']) - 1:
+                            next_op = analysis['critical_path'][j + 1]['operation_name']
+                            A[i][node_to_index[next_op]] = prob
+        
+        # Fill Aot (Operation to Trace)
+        for op in operations:
+            i = node_to_index[op]
+            num_outgoing = op_outgoing_edges[op]
+            if num_outgoing > 0:
+                prob = 1.0 / num_outgoing
+                for trace in traces:
+                    if any(span['operation_name'] == op for span in self.all_traces_info[trace]['critical_path']):
+                        A[i][node_to_index[trace]] = prob
+        
+        # Fill Ato (Trace to Operation)
+        for trace in traces:
+            i = node_to_index[trace]
+            num_outgoing = trace_outgoing_edges[trace]
+            if num_outgoing > 0:
+                prob = 1.0 / num_outgoing
+                for span in self.all_traces_info[trace]['critical_path']:
+                    A[i][node_to_index[span['operation_name']]] = prob
+        
+        # Initialize vectors
+        v = np.zeros(n)
+        v[:No] = 1.0 / No  # Vo: Initial distribution for operations
+        v[No:] = 1.0 / Nt  # Vt: Initial distribution for traces
+        
+        # Initialize uniform vector u with the same structure as v
+        u = np.zeros(n)
+        u[:No] = 1.0 / No
+        u[No:] = 1.0 / Nt
+        
+        # Power iteration
+        for iteration in range(max_iterations):
+            v_next = damping_factor * np.dot(A, v) + (1 - damping_factor) * u
+            
+            # Check convergence
+            if np.sum(np.abs(v_next - v)) < epsilon:
+                v = v_next
+                break
+                
+            v = v_next
+        
+        # Convert results to dictionary
+        ranks = {}
+        
+        # Store operation ranks
+        for op in operations:
+            ranks[op] = v[node_to_index[op]]
+        
+        # Store trace ranks
+        for trace in traces:
+            ranks[trace] = v[node_to_index[trace]]
+        
+        # Sort ranks by value in descending order
+        sorted_ranks = dict(sorted(ranks.items(), key=lambda x: x[1], reverse=True))
+        
+        # Write results to file
+        with open("node_ranks.txt", "w") as f:
+            f.write("Node Rankings\n")
+            f.write("=" * 30 + "\n\n")
+            f.write("Format: Node: Rank Score\n\n")
+            
+            # Write operation ranks
+            f.write("Operations:\n")
+            f.write("-" * 20 + "\n")
+            for node, rank in sorted_ranks.items():
+                if node in operations:
+                    f.write(f"{node}: {rank:.6f}\n")
+            f.write("\n")
+            
+            # Write trace ranks
+            f.write("Traces:\n")
+            f.write("-" * 20 + "\n")
+            for node, rank in sorted_ranks.items():
+                if node in traces:
+                    f.write(f"{node}: {rank:.6f}\n")
+            
+            # Write initialization information
+            f.write("\nInitialization Information:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Number of operations (No): {No}\n")
+            f.write(f"Number of traces (Nt): {Nt}\n")
+            f.write(f"Initial value for operations (1/No): {1/No:.6f}\n")
+            f.write(f"Initial value for traces (1/Nt): {1/Nt:.6f}\n")
+        
+        return sorted_ranks
+
 def main():
     analyzer = TraceAnalyzer()
     directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/Second-Paper/anomaly-injected"
     results = analyzer.analyze_all_traces(directory_path)
     
     # Write critical paths to file
-    analyzer.write_critical_paths_to_file("critical_paths.txt")
+    abnormal_traces = analyzer.write_critical_paths_to_file("critical_paths.txt")
     print("\nCritical paths have been written to critical_paths.txt")
+    
+
+
+    # Calculate and print transition probabilities for all traces
+    analyzer.print_transition_matrix("transition_matrix_all.txt")
+    print("\nTransition probabilities for all traces have been written to transition_matrix_all.txt")
+    
+    # Calculate and print transition probabilities for abnormal traces only
+    analyzer.print_transition_matrix("transition_matrix_abnormal.txt", abnormal_only=True)
+    print("\nTransition probabilities for abnormal traces have been written to transition_matrix_abnormal.txt")
+    
+    # Create and write partitioned matrix for all traces
+    analyzer.create_partitioned_matrix("partitioned_matrix_all.txt")
+    print("\nPartitioned transition matrix for all traces has been written to partitioned_matrix_all.txt")
+    
+    # Create and write partitioned matrix for abnormal traces only
+    analyzer.create_partitioned_matrix("partitioned_matrix_abnormal.txt", abnormal_only=True)
+    print("\nPartitioned transition matrix for abnormal traces has been written to partitioned_matrix_abnormal.txt")
     
     # Get critical path durations
     durations = analyzer.get_critical_path_durations()
@@ -334,6 +754,17 @@ def main():
             print(f"    Count: {stats['count']}")
             print(f"    Mean Duration: {stats['mean_duration']/1000:.2f}ms")
             print(f"    Mean Self Time: {stats['mean_self_time']/1000:.2f}ms")
+    
+    # Calculate node ranks
+    ranks = analyzer.calculate_node_ranks()
+    print("\nNode ranks have been written to node_ranks.txt")
+    
+    # Print top 10 ranked nodes
+    print("\nTop 10 Ranked Nodes:")
+    for i, (node, rank) in enumerate(ranks.items()):
+        if i >= 10:
+            break
+        print(f"{node}: {rank:.6f}")
 
 if __name__ == "__main__":
-    main()
+    main() 
