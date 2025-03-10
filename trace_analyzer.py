@@ -247,6 +247,8 @@ class TraceAnalyzer:
         
         return groups
 
+
+
     def write_critical_paths_to_file(self, output_file="critical_paths.txt"):
         """Write critical paths to a file, grouping similar paths together and including expected and actual latencies"""
         groups = self.group_similar_critical_paths()
@@ -706,33 +708,407 @@ class TraceAnalyzer:
             f.write(f"Initial value for traces (1/Nt): {1/Nt:.6f}\n")
         
         return sorted_ranks
+    
+    def create_partitioned_matrix(self, output_file="partitioned_matrix.txt", abnormal_only=False):
+        """
+        Create a partitioned matrix A = [[Aoo][Aot][Ato][0]] where:
+        - Aoo: transitions between operations
+        - Aot: transitions from operations to traces
+        - Ato: transitions from traces to operations
+        """
+        # Get all unique operations and traces
+        operations = set()
+        traces = set()
+        
+        # If abnormal_only is True, only consider abnormal traces
+        if abnormal_only:
+            traces = {trace['trace_name'] for trace in self.abnormal_traces}
+        else:
+            traces = set(self.all_traces_info.keys())
+        
+        for analysis in self.all_traces_info.values():
+            for span in analysis['critical_path']:
+                operations.add(span['operation_name'])
+        
+        operations = sorted(list(operations))
+        traces = sorted(list(traces))
+        
+        # Create numpy matrix for the complete transition matrix
+        n = len(operations) + len(traces)
+        A = np.zeros((n, n))
+        node_to_index = {node: i for i, node in enumerate(operations + traces)}
+        
+        # Calculate Aoo (Operation to Operation)
+        for op1 in operations:
+            outgoing_ops = set()
+            for analysis in self.all_traces_info.values():
+                if abnormal_only and analysis not in self.abnormal_traces:
+                    continue
+                for i, span in enumerate(analysis['critical_path'][:-1]):
+                    if span['operation_name'] == op1:
+                        next_op = analysis['critical_path'][i + 1]['operation_name']
+                        outgoing_ops.add(next_op)
+            
+            if outgoing_ops:
+                prob = 1.0 / len(outgoing_ops)
+                for op2 in outgoing_ops:
+                    A[node_to_index[op1]][node_to_index[op2]] = prob
+        
+        # Calculate Aot (Operation to Trace)
+        for op in operations:
+            connected_traces = set()
+            for trace_name, analysis in self.all_traces_info.items():
+                if abnormal_only and trace_name not in traces:
+                    continue
+                if any(span['operation_name'] == op for span in analysis['critical_path']):
+                    connected_traces.add(trace_name)
+            
+            if connected_traces:
+                prob = 1.0 / len(connected_traces)
+                for trace_name in connected_traces:
+                    A[node_to_index[op]][node_to_index[trace_name]] = prob
+        
+        # Calculate Ato (Trace to Operation)
+        for trace_name in traces:
+            if trace_name in self.all_traces_info:
+                ops_in_trace = set(span['operation_name'] for span in self.all_traces_info[trace_name]['critical_path'])
+                if ops_in_trace:
+                    prob = 1.0 / len(ops_in_trace)
+                    for op in ops_in_trace:
+                        A[node_to_index[trace_name]][node_to_index[op]] = prob
+        
+        # Write the matrix to file
+        with open(output_file, 'w') as f:
+            f.write("Partitioned Transition Matrix\n")
+            if abnormal_only:
+                f.write("(Abnormal Traces Only)\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Matrix dimensions: {}x{}\n".format(n, n))
+            f.write("Node order: " + ", ".join(operations + traces) + "\n\n")
+            
+            # Write the complete matrix
+            f.write("Complete Matrix A:\n")
+            np.savetxt(f, A, fmt='%.3f')
+            f.write("\n")
+            
+            # Write individual quadrants for better readability
+            f.write("Matrix Quadrants:\n")
+            f.write("-" * 40 + "\n")
+            
+            No = len(operations)
+            # Write Aoo
+            f.write("\nAoo (Operation to Operation):\n")
+            np.savetxt(f, A[:No, :No], fmt='%.3f')
+            
+            # Write Aot
+            f.write("\nAot (Operation to Trace):\n")
+            np.savetxt(f, A[:No, No:], fmt='%.3f')
+            
+            # Write Ato
+            f.write("\nAto (Trace to Operation):\n")
+            np.savetxt(f, A[No:, :No], fmt='%.3f')
+        
+        return {
+            'matrix': A,
+            'operations': operations,
+            'traces': traces,
+            'node_to_index': node_to_index
+        }
+    
+    def create_partitioned_matrix_for_critical_paths(self, output_file="critical_path_matrix.txt"):
+        """
+        Create a partitioned matrix A = [[Aoo][Aot][Ato][0]] specifically for critical paths of abnormal traces.
+        """
+        # Get all unique operations from critical paths of abnormal traces
+        operations = set()
+        traces = set()
+        
+        # Get abnormal traces and their critical paths
+        abnormal_trace_paths = {}
+        for trace in self.abnormal_traces:
+            trace_name = trace['trace_name']
+            traces.add(trace_name)
+            critical_path = self.all_traces_info[trace_name]['critical_path']
+            abnormal_trace_paths[trace_name] = critical_path
+            for span in critical_path:
+                operations.add(span['operation_name'])
+        
+        operations = sorted(list(operations))
+        traces = sorted(list(traces))
+        
+        # Create numpy matrix for the complete transition matrix
+        n = len(operations) + len(traces)
+        A = np.zeros((n, n))
+        node_to_index = {node: i for i, node in enumerate(operations + traces)}
+        
+        # Calculate Aoo (Operation to Operation) based on critical path transitions
+        for trace_name, critical_path in abnormal_trace_paths.items():
+            for i in range(len(critical_path) - 1):
+                current_op = critical_path[i]['operation_name']
+                next_op = critical_path[i + 1]['operation_name']
+                idx_current = node_to_index[current_op]
+                idx_next = node_to_index[next_op]
+                A[idx_current][idx_next] += 1
+        
+        # Normalize Aoo
+        for i in range(len(operations)):
+            row_sum = np.sum(A[i, :len(operations)])
+            if row_sum > 0:
+                A[i, :len(operations)] /= row_sum
+        
+        # Calculate Aot (Operation to Trace)
+        for op in operations:
+            op_idx = node_to_index[op]
+            connected_traces = set()
+            for trace_name, critical_path in abnormal_trace_paths.items():
+                if any(span['operation_name'] == op for span in critical_path):
+                    connected_traces.add(trace_name)
+            
+            if connected_traces:
+                prob = 1.0 / len(connected_traces)
+                for trace_name in connected_traces:
+                    A[op_idx][node_to_index[trace_name]] = prob
+        
+        # Calculate Ato (Trace to Operation)
+        for trace_name, critical_path in abnormal_trace_paths.items():
+            trace_idx = node_to_index[trace_name]
+            ops_in_path = set(span['operation_name'] for span in critical_path)
+            if ops_in_path:
+                prob = 1.0 / len(ops_in_path)
+                for op in ops_in_path:
+                    A[trace_idx][node_to_index[op]] = prob
+        
+        # Write the matrix to file
+        with open(output_file, 'w') as f:
+            f.write("Critical Path Transition Matrix for Abnormal Traces\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Matrix Information:\n")
+            f.write(f"Number of Operations: {len(operations)}\n")
+            f.write(f"Number of Abnormal Traces: {len(traces)}\n")
+            f.write(f"Total Matrix Size: {n}x{n}\n\n")
+            
+            f.write("Operations: " + ", ".join(operations) + "\n\n")
+            f.write("Abnormal Traces: " + ", ".join(traces) + "\n\n")
+            
+            # Write the complete matrix
+            f.write("Complete Matrix A:\n")
+            np.savetxt(f, A, fmt='%.3f')
+            f.write("\n")
+            
+            # Write individual quadrants
+            No = len(operations)
+            f.write("Matrix Quadrants:\n")
+            f.write("-" * 40 + "\n")
+            
+            f.write("\nAoo (Operation to Operation transitions in critical paths):\n")
+            np.savetxt(f, A[:No, :No], fmt='%.3f')
+            
+            f.write("\nAot (Operation to Trace transitions):\n")
+            np.savetxt(f, A[:No, No:], fmt='%.3f')
+            
+            f.write("\nAto (Trace to Operation transitions):\n")
+            np.savetxt(f, A[No:, :No], fmt='%.3f')
+            
+            # Write critical paths for reference
+            f.write("\nCritical Paths:\n")
+            f.write("-" * 40 + "\n")
+            for trace_name, critical_path in abnormal_trace_paths.items():
+                f.write(f"\n{trace_name}:\n")
+                path_str = " -> ".join(span['operation_name'] for span in critical_path)
+                f.write(f"{path_str}\n")
+        
+        return {
+            'matrix': A,
+            'operations': operations,
+            'traces': traces,
+            'node_to_index': node_to_index,
+            'critical_paths': abnormal_trace_paths
+        }
+    
+
+    def calculate_personalized_pagerank(self, damping_factor=0.85, epsilon=1e-8, max_iterations=100, preference_vector=None):
+        """
+        Calculate personalized PageRank scores using the iterative algorithm:
+        v(q) = d·Av(q−1) + (1−d)·u
+        
+        Parameters:
+        - damping_factor (d): typically 0.85
+        - epsilon: convergence threshold
+        - max_iterations: maximum number of iterations
+        - preference_vector: custom preference vector u (if None, uses uniform distribution)
+        
+        Returns:
+        - Dictionary mapping nodes to their PageRank scores
+        """
+        # Get all nodes (operations and traces)
+        operations = set()
+        traces = set(self.all_traces_info.keys())
+        
+        for analysis in self.all_traces_info.values():
+            for span in analysis['critical_path']:
+                operations.add(span['operation_name'])
+        
+        operations = sorted(list(operations))
+        traces = sorted(list(traces))
+        
+        n = len(operations) + len(traces)  # Total number of nodes
+        node_to_index = {node: i for i, node in enumerate(operations + traces)}
+        index_to_node = {i: node for node, i in node_to_index.items()}
+        
+        # Create transition matrix A
+        A = np.zeros((n, n))
+        
+        # Fill transition matrix A with probabilities
+        # Operation to Operation transitions
+        for op1 in operations:
+            outgoing_ops = set()
+            for analysis in self.all_traces_info.values():
+                for i, span in enumerate(analysis['critical_path'][:-1]):
+                    if span['operation_name'] == op1:
+                        next_op = analysis['critical_path'][i + 1]['operation_name']
+                        outgoing_ops.add(next_op)
+            
+            if outgoing_ops:
+                prob = 1.0 / len(outgoing_ops)
+                for op2 in outgoing_ops:
+                    A[node_to_index[op1]][node_to_index[op2]] = prob
+        
+        # Operation to Trace transitions
+        for op in operations:
+            connected_traces = set()
+            for trace_name, analysis in self.all_traces_info.items():
+                if any(span['operation_name'] == op for span in analysis['critical_path']):
+                    connected_traces.add(trace_name)
+            
+            if connected_traces:
+                prob = 1.0 / len(connected_traces)
+                for trace_name in connected_traces:
+                    A[node_to_index[op]][node_to_index[trace_name]] = prob
+        
+        # Trace to Operation transitions
+        for trace_name in traces:
+            if trace_name in self.all_traces_info:
+                ops_in_trace = set(span['operation_name'] 
+                                for span in self.all_traces_info[trace_name]['critical_path'])
+                if ops_in_trace:
+                    prob = 1.0 / len(ops_in_trace)
+                    for op in ops_in_trace:
+                        A[node_to_index[trace_name]][node_to_index[op]] = prob
+        
+        # Initialize preference vector u (uniform if not provided)
+        if preference_vector is None:
+            u = np.ones(n) / n  # Uniform distribution
+        else:
+            u = np.array([preference_vector.get(node, 0.0) for node in operations + traces])
+            if np.sum(u) == 0:
+                raise ValueError("Preference vector cannot sum to zero")
+            u = u / np.sum(u)  # Normalize to sum to 1
+        
+        # Initialize PageRank vector v
+        v = np.ones(n) / n
+        
+        # Power iteration
+        for iteration in range(max_iterations):
+            v_next = damping_factor * np.dot(A, v) + (1 - damping_factor) * u
+            
+            # Check convergence
+            if np.sum(np.abs(v_next - v)) < epsilon:
+                v = v_next
+                break
+                
+            v = v_next
+        
+        # Convert results to dictionary
+        ranks = {node: v[idx] for node, idx in node_to_index.items()}
+        sorted_ranks = dict(sorted(ranks.items(), key=lambda x: x[1], reverse=True))
+        
+        # Write results to file
+        with open("personalized_pagerank.txt", "w") as f:
+            f.write("Personalized PageRank Results\n")
+            f.write("=" * 30 + "\n\n")
+            
+            f.write("Parameters:\n")
+            f.write(f"Damping factor: {damping_factor}\n")
+            f.write(f"Convergence threshold: {epsilon}\n")
+            f.write(f"Number of nodes: {n}\n\n")
+            
+            # Write operation ranks
+            f.write("Operation Rankings:\n")
+            f.write("-" * 20 + "\n")
+            for node, rank in sorted_ranks.items():
+                if node in operations:
+                    f.write(f"{node}: {rank:.6f}\n")
+            f.write("\n")
+            
+            # Write trace ranks
+            f.write("Trace Rankings:\n")
+            f.write("-" * 20 + "\n")
+            for node, rank in sorted_ranks.items():
+                if node in traces:
+                    f.write(f"{node}: {rank:.6f}\n")
+            
+            # Write preference vector
+            f.write("\nPreference Vector:\n")
+            f.write("-" * 20 + "\n")
+            for i, value in enumerate(u):
+                f.write(f"{index_to_node[i]}: {value:.6f}\n")
+        
+        return sorted_ranks
+    
+
+
 
 def main():
     analyzer = TraceAnalyzer()
-    directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/Second-Paper/anomaly-injected"
+    
+    # Get current working directory
+    current_dir = os.getcwd()
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join(current_dir, "analysis_output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Input directory path
+    directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/article/article-3"
     results = analyzer.analyze_all_traces(directory_path)
     
-    # Write critical paths to file
-    abnormal_traces = analyzer.write_critical_paths_to_file("critical_paths.txt")
-    print("\nCritical paths have been written to critical_paths.txt")
+    # Write critical paths to file in the output directory
+    output_file = os.path.join(output_dir, "critical_paths.txt")
+    abnormal_traces = analyzer.write_critical_paths_to_file(output_file)
+    print(f"\nCritical paths have been written to {output_file}")
     
+
+    # Create matrix for critical paths of abnormal traces
+    output_file = os.path.join(output_dir, "critical_path_matrix.txt")
+    critical_path_matrix = analyzer.create_partitioned_matrix_for_critical_paths(output_file)
+    print(f"\nCritical path transition matrix has been written to {output_file}")
+    print(f"Matrix dimensions: {critical_path_matrix['matrix'].shape}")
+    print(f"Number of operations in critical paths: {len(critical_path_matrix['operations'])}")
+    print(f"Number of abnormal traces: {len(critical_path_matrix['traces'])}")
 
 
     # Calculate and print transition probabilities for all traces
-    analyzer.print_transition_matrix("transition_matrix_all.txt")
-    print("\nTransition probabilities for all traces have been written to transition_matrix_all.txt")
+    #analyzer.print_transition_matrix("transition_matrix_all.txt")
+    #print("\nTransition probabilities for all traces have been written to transition_matrix_all.txt")
     
+
     # Calculate and print transition probabilities for abnormal traces only
-    analyzer.print_transition_matrix("transition_matrix_abnormal.txt", abnormal_only=True)
-    print("\nTransition probabilities for abnormal traces have been written to transition_matrix_abnormal.txt")
+    output_file = os.path.join(output_dir, "transition_matrix_abnormal.txt")
+    analyzer.print_transition_matrix(output_file, abnormal_only=True)
+    print(f"\nTransition probabilities for abnormal traces have been written to {output_file}")
     
     # Create and write partitioned matrix for all traces
-    analyzer.create_partitioned_matrix("partitioned_matrix_all.txt")
-    print("\nPartitioned transition matrix for all traces has been written to partitioned_matrix_all.txt")
+    output_file = os.path.join(output_dir, "transition_matrix_abnormal.txt")
+    analyzer.create_partitioned_matrix(output_file)
+    print(f"\nPartitioned transition matrix for all traces has been written to {output_file}")
     
     # Create and write partitioned matrix for abnormal traces only
-    analyzer.create_partitioned_matrix("partitioned_matrix_abnormal.txt", abnormal_only=True)
-    print("\nPartitioned transition matrix for abnormal traces has been written to partitioned_matrix_abnormal.txt")
+    output_file = os.path.join(output_dir, "partitioned_matrix_abnormal.txt")
+    analyzer.create_partitioned_matrix(output_file, abnormal_only=True)
+    print(f"\nPartitioned transition matrix for abnormal traces has been written to {output_file}")
     
     # Get critical path durations
     durations = analyzer.get_critical_path_durations()
@@ -762,6 +1138,35 @@ def main():
     # Print top 10 ranked nodes
     print("\nTop 10 Ranked Nodes:")
     for i, (node, rank) in enumerate(ranks.items()):
+        if i >= 10:
+            break
+        print(f"{node}: {rank:.6f}")
+
+
+        # Calculate PageRank with uniform preference
+    ranks = analyzer.calculate_personalized_pagerank()
+    print("\nPageRank scores have been written to personalized_pagerank.txt")
+    
+    # Print top 10 ranked nodes
+    print("\nTop 10 Ranked Nodes:")
+    for i, (node, rank) in enumerate(ranks.items()):
+        if i >= 10:
+            break
+        print(f"{node}: {rank:.6f}")
+    
+    # Example: Calculate PageRank with preference for abnormal traces
+    abnormal_preference = {}
+    for trace in analyzer.abnormal_traces:
+        abnormal_preference[trace['trace_name']] = 1.0
+    
+    ranks_abnormal = analyzer.calculate_personalized_pagerank(
+        preference_vector=abnormal_preference,
+        damping_factor=0.85,
+        epsilon=1e-8
+    )
+    
+    print("\nTop 10 Ranked Nodes (with preference for abnormal traces):")
+    for i, (node, rank) in enumerate(ranks_abnormal.items()):
         if i >= 10:
             break
         print(f"{node}: {rank:.6f}")
