@@ -1388,141 +1388,125 @@ def main():
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
+    # Define a single output file for all analysis results
+    output_file = os.path.join(output_dir, "trace_analysis_results.txt")
+    
     # Input directory path
     directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/article/article-3"
     results = analyzer.analyze_all_traces(directory_path)
     
-    # Write critical paths to file in the output directory
-    output_file = os.path.join(output_dir, "critical_paths.txt")
-    abnormal_traces = analyzer.write_critical_paths_to_file(output_file)
-    print(f"\nCritical paths have been written to {output_file}")
-    
+    # Write all analysis results to the same file
+    with open(output_file, 'w') as f:
+        # Critical paths analysis
+        f.write("CRITICAL PATHS ANALYSIS\n")
+        f.write("=" * 50 + "\n\n")
+        abnormal_traces = analyzer.write_critical_paths_to_file(output_file)
+        
+        # Critical path matrix
+        f.write("\n\nCRITICAL PATH TRANSITION MATRIX\n")
+        f.write("=" * 50 + "\n\n")
+        critical_path_matrix = analyzer.create_partitioned_matrix_for_critical_paths(output_file)
+        print(f"Matrix dimensions: {critical_path_matrix['matrix'].shape}")
+        print(f"Number of operations in critical paths: {len(critical_path_matrix['operations'])}")
+        print(f"Number of abnormal traces: {len(critical_path_matrix['traces'])}")
+        
+        # Transition probabilities for abnormal traces
+        f.write("\n\nTRANSITION PROBABILITIES (ABNORMAL TRACES)\n")
+        f.write("=" * 50 + "\n\n")
+        analyzer.print_transition_matrix(output_file, abnormal_only=True)
+        
+        # Partitioned matrix for all traces
+        f.write("\n\nPARTITIONED MATRIX (ALL TRACES)\n")
+        f.write("=" * 50 + "\n\n")
+        analyzer.create_partitioned_matrix(output_file)
+        
+        # Partitioned matrix for abnormal traces
+        f.write("\n\nPARTITIONED MATRIX (ABNORMAL TRACES)\n")
+        f.write("=" * 50 + "\n\n")
+        analyzer.create_partitioned_matrix(output_file, abnormal_only=True)
+        
+        # Get critical path durations
+        f.write("\n\nCRITICAL PATH DURATIONS\n")
+        f.write("=" * 50 + "\n\n")
+        durations = analyzer.get_critical_path_durations()
+        for file_name, duration in durations.items():
+            f.write(f"{file_name}: {duration:.2f} ms\n")
+        
+        # Print detailed analysis
+        f.write("\n\nDETAILED TRACE ANALYSIS\n")
+        f.write("=" * 50 + "\n\n")
+        for trace_name, analysis in results.items():
+            f.write(f"\nAnalysis for trace: {trace_name}\n")
+            f.write("Critical Path Operations:\n")
+            for span in analysis['critical_path']:
+                f.write(f"  {span['operation_name']}: {span['duration']/1000:.2f}ms (self time: {span['self_time']/1000:.2f}ms)\n")
+            f.write(f"\nTotal Duration of Critical Path: {analysis['statistics']['total_duration']/1000:.2f}ms\n")
+            f.write(f"Total Self Time in Critical Path: {analysis['statistics']['total_self_time']/1000:.2f}ms\n")
+            f.write("\nOperation Statistics:\n")
+            for op_name, stats in analysis['statistics']['operation_stats'].items():
+                f.write(f"  {op_name}:\n")
+                f.write(f"    Count: {stats['count']}\n")
+                f.write(f"    Mean Duration: {stats['mean_duration']/1000:.2f}ms\n")
+                f.write(f"    Mean Self Time: {stats['mean_self_time']/1000:.2f}ms\n")
+        
+        # Node ranks
+        f.write("\n\nNODE RANKS\n")
+        f.write("=" * 50 + "\n\n")
+        ranks = analyzer.calculate_node_ranks()
+        for node, rank in list(ranks.items())[:10]:
+            f.write(f"{node}: {rank:.6f}\n")
+        
+        # PageRank analysis
+        f.write("\n\nPAGERANK ANALYSIS\n")
+        f.write("=" * 50 + "\n\n")
+        ranks = analyzer.calculate_personalized_pagerank()
+        f.write("Top 10 Ranked Nodes:\n")
+        for node, rank in list(ranks.items())[:10]:
+            f.write(f"{node}: {rank:.6f}\n")
+        
+        # PageRank with preference for abnormal traces
+        abnormal_preference = {}
+        for trace in analyzer.abnormal_traces:
+            abnormal_preference[trace['trace_name']] = 1.0
+        
+        ranks_abnormal = analyzer.calculate_personalized_pagerank(
+            preference_vector=abnormal_preference,
+            damping_factor=0.85,
+            epsilon=1e-8
+        )
+        
+        f.write("\nTop 10 Ranked Nodes (with preference for abnormal traces):\n")
+        for node, rank in list(ranks_abnormal.items())[:10]:
+            f.write(f"{node}: {rank:.6f}\n")
+        
+        # Operation coverage scores
+        f.write("\n\nOPERATION COVERAGE SCORES\n")
+        f.write("=" * 50 + "\n\n")
+        coverage_scores = analyzer.calculate_operation_coverage_scores()
+        sorted_ops = sorted(coverage_scores.items(), 
+                          key=lambda x: x[1]['Oef'], 
+                          reverse=True)
+        for operation, scores in sorted_ops[:10]:
+            f.write(f"{operation}: {scores['Oef']:.6f}\n")
+        
+        # Abnormal coverage ranking
+        f.write("\n\nABNORMAL COVERAGE RANKING\n")
+        f.write("=" * 50 + "\n\n")
+        sorted_operations = analyzer.analyze_abnormal_coverage_ranking()
+        for rank, (operation, scores) in enumerate(sorted_operations[:10], 1):
+            f.write(f"{rank}. {operation}: {scores['Oef']:.6f}\n")
+            f.write(f"   Abnormal traces covered: {scores['coverage_stats']['abnormal_traces_covered']}/")
+            f.write(f"{scores['coverage_stats']['total_abnormal_traces']}\n")
+        
+        # Lowest level operations
+        f.write("\n\nLOWEST LEVEL OPERATIONS\n")
+        f.write("=" * 50 + "\n\n")
+        lowest_level_results = analyzer.find_lowest_level_operations()
+        f.write(f"Found {len(lowest_level_results['lowest_level_operations'])} operations at level {lowest_level_results['max_level']}:\n")
+        for op_name, info in lowest_level_results['lowest_level_operations'].items():
+            f.write(f"- {op_name}: {info['occurrences']} occurrences\n")
 
-    # Create matrix for critical paths of abnormal traces
-    output_file = os.path.join(output_dir, "critical_path_matrix.txt")
-    critical_path_matrix = analyzer.create_partitioned_matrix_for_critical_paths(output_file)
-    print(f"\nCritical path transition matrix has been written to {output_file}")
-    print(f"Matrix dimensions: {critical_path_matrix['matrix'].shape}")
-    print(f"Number of operations in critical paths: {len(critical_path_matrix['operations'])}")
-    print(f"Number of abnormal traces: {len(critical_path_matrix['traces'])}")
-
-
-    # Calculate and print transition probabilities for all traces
-    #analyzer.print_transition_matrix("transition_matrix_all.txt")
-    #print("\nTransition probabilities for all traces have been written to transition_matrix_all.txt")
-    
-
-    # Calculate and print transition probabilities for abnormal traces only
-    output_file = os.path.join(output_dir, "transition_matrix_abnormal.txt")
-    analyzer.print_transition_matrix(output_file, abnormal_only=True)
-    print(f"\nTransition probabilities for abnormal traces have been written to {output_file}")
-    
-    # Create and write partitioned matrix for all traces
-    output_file = os.path.join(output_dir, "transition_matrix_abnormal.txt")
-    analyzer.create_partitioned_matrix(output_file)
-    print(f"\nPartitioned transition matrix for all traces has been written to {output_file}")
-    
-    # Create and write partitioned matrix for abnormal traces only
-    output_file = os.path.join(output_dir, "partitioned_matrix_abnormal.txt")
-    analyzer.create_partitioned_matrix(output_file, abnormal_only=True)
-    print(f"\nPartitioned transition matrix for abnormal traces has been written to {output_file}")
-    
-    # Get critical path durations
-    durations = analyzer.get_critical_path_durations()
-    print("\nCritical Path Durations by File:")
-    for file_name, duration in durations.items():
-        print(f"{file_name}: {duration:.2f} ms")
-    
-    # Print detailed analysis
-    for trace_name, analysis in results.items():
-        print(f"\nAnalysis for trace: {trace_name}")
-        print("Critical Path Operations:")
-        for span in analysis['critical_path']:
-            print(f"  {span['operation_name']}: {span['duration']/1000:.2f}ms (self time: {span['self_time']/1000:.2f}ms)")
-        print(f"\nTotal Duration of Critical Path: {analysis['statistics']['total_duration']/1000:.2f}ms")
-        print(f"Total Self Time in Critical Path: {analysis['statistics']['total_self_time']/1000:.2f}ms")
-        print("\nOperation Statistics:")
-        for op_name, stats in analysis['statistics']['operation_stats'].items():
-            print(f"  {op_name}:")
-            print(f"    Count: {stats['count']}")
-            print(f"    Mean Duration: {stats['mean_duration']/1000:.2f}ms")
-            print(f"    Mean Self Time: {stats['mean_self_time']/1000:.2f}ms")
-    
-    # Calculate node ranks
-    ranks = analyzer.calculate_node_ranks()
-    print("\nNode ranks have been written to node_ranks.txt")
-    
-    # Print top 10 ranked nodes
-    print("\nTop 10 Ranked Nodes:")
-    for i, (node, rank) in enumerate(ranks.items()):
-        if i >= 10:
-            break
-        print(f"{node}: {rank:.6f}")
-
-
-        # Calculate PageRank with uniform preference
-    ranks = analyzer.calculate_personalized_pagerank()
-    print("\nPageRank scores have been written to personalized_pagerank.txt")
-    
-    # Print top 10 ranked nodes
-    print("\nTop 10 Ranked Nodes:")
-    for i, (node, rank) in enumerate(ranks.items()):
-        if i >= 10:
-            break
-        print(f"{node}: {rank:.6f}")
-    
-    # Example: Calculate PageRank with preference for abnormal traces
-    abnormal_preference = {}
-    for trace in analyzer.abnormal_traces:
-        abnormal_preference[trace['trace_name']] = 1.0
-    
-    ranks_abnormal = analyzer.calculate_personalized_pagerank(
-        preference_vector=abnormal_preference,
-        damping_factor=0.85,
-        epsilon=1e-8
-    )
-    
-    print("\nTop 10 Ranked Nodes (with preference for abnormal traces):")
-    for i, (node, rank) in enumerate(ranks_abnormal.items()):
-        if i >= 10:
-            break
-        print(f"{node}: {rank:.6f}")
-
-    
-    # Calculate operation coverage scores
-    coverage_scores = analyzer.calculate_operation_coverage_scores()
-    print("\nOperation coverage scores have been written to operation_coverage_scores.txt")
-    
-    # Print top operations by abnormal coverage score (Oef)
-    print("\nTop Operations by Abnormal Coverage Score (Oef):")
-    sorted_ops = sorted(coverage_scores.items(), 
-                       key=lambda x: x[1]['Oef'], 
-                       reverse=True)
-    for i, (operation, scores) in enumerate(sorted_ops[:10]):
-        print(f"{operation}: {scores['Oef']:.6f}")
-
-    
-    # Analyze and rank operations by abnormal coverage
-    sorted_operations = analyzer.analyze_abnormal_coverage_ranking()
-    print("\nOperation ranking has been written to abnormal_coverage_ranking.txt")
-    
-    # Print top 10 operations
-    print("\nTop 10 Operations by Abnormal Coverage Score (Oef):")
-    for rank, (operation, scores) in enumerate(sorted_operations[:10], 1):
-        print(f"{rank}. {operation}: {scores['Oef']:.6f}")
-        print(f"   Abnormal traces covered: {scores['coverage_stats']['abnormal_traces_covered']}/")
-        print(f"   {scores['coverage_stats']['total_abnormal_traces']}")
-
-
-    # Find and analyze lowest level operations
-    lowest_level_results = analyzer.find_lowest_level_operations()
-    print("\nLowest level operations analysis has been written to lowest_level_operations.txt")
-    
-    # Print summary of lowest level operations
-    print(f"\nFound {len(lowest_level_results['lowest_level_operations'])} operations at level {lowest_level_results['max_level']}:")
-    for op_name, info in lowest_level_results['lowest_level_operations'].items():
-        print(f"- {op_name}: {info['occurrences']} occurrences")
-
+    print(f"\nAll analysis results have been written to {output_file}")
 
 if __name__ == "__main__":
-    main() 
+    main()
