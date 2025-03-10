@@ -1060,6 +1060,323 @@ class TraceAnalyzer:
 
 
 
+
+
+
+    def calculate_operation_coverage_scores(self):
+        """
+        Calculate operation coverage scores based on normal and abnormal trace coverage.
+        
+        Returns:
+            Dictionary containing Oef, Oep, Onf, Onp scores for each operation
+        """
+        # Get all unique operations from critical paths
+        operations = set()
+        for analysis in self.all_traces_info.values():
+            for span in analysis['critical_path']:
+                operations.add(span['operation_name'])
+        
+        # Get sets of normal and abnormal trace names
+        abnormal_trace_names = {trace['trace_name'] for trace in self.abnormal_traces}
+        all_trace_names = set(self.all_traces_info.keys())
+        normal_trace_names = all_trace_names - abnormal_trace_names
+        
+        # Calculate PageRank scores for all traces
+        pagerank_scores = self.calculate_personalized_pagerank()
+        
+        # Calculate coverage statistics and scores for each operation
+        coverage_scores = {}
+        for operation in operations:
+            # Initialize counters
+            Nef = 0  # Number of abnormal traces covering the operation
+            Nep = 0  # Number of normal traces covering the operation
+            
+            # Count coverage in abnormal and normal traces
+            for trace_name, analysis in self.all_traces_info.items():
+                op_in_trace = any(span['operation_name'] == operation 
+                                for span in analysis['critical_path'])
+                if op_in_trace:
+                    if trace_name in abnormal_trace_names:
+                        Nef += 1
+                    else:
+                        Nep += 1
+            
+            # Get total counts
+            Nf = len(abnormal_trace_names)  # Total number of abnormal traces
+            Np = len(normal_trace_names)    # Total number of normal traces
+            # Get PageRank score for the operation
+            F = pagerank_scores.get(operation, 0)  # Anomalous PageRank score
+            P = 1 - F  # Normal PageRank score (complement of anomalous score)
+            
+            # Calculate the four scores
+            Oef = F * Nef
+            Oep = P * Nep
+            Onf = F * (Nf - Nef)
+            Onp = P * (Np - Nep)
+            
+            coverage_scores[operation] = {
+                'Oef': Oef,
+                'Oep': Oep,
+                'Onf': Onf,
+                'Onp': Onp,
+                'coverage_stats': {
+                    'abnormal_traces_covered': Nef,
+                    'normal_traces_covered': Nep,
+                    'total_abnormal_traces': Nf,
+                    'total_normal_traces': Np,
+                    'pagerank_score': F
+                }
+            }
+        
+        # Write results to file
+        with open("operation_coverage_scores.txt", 'w') as f:
+            f.write("Operation Coverage Analysis\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Coverage Scores:\n")
+            f.write("-" * 30 + "\n")
+            for operation, scores in coverage_scores.items():
+                f.write(f"\nOperation: {operation}\n")
+                f.write(f"Oef (Abnormal coverage score): {scores['Oef']:.6f}\n")
+                f.write(f"Oep (Normal coverage score): {scores['Oep']:.6f}\n")
+                f.write(f"Onf (Abnormal non-coverage score): {scores['Onf']:.6f}\n")
+                f.write(f"Onp (Normal non-coverage score): {scores['Onp']:.6f}\n")
+                
+                stats = scores['coverage_stats']
+                f.write("\nCoverage Statistics:\n")
+                f.write(f"- Abnormal traces covered: {stats['abnormal_traces_covered']}/{stats['total_abnormal_traces']}\n")
+                f.write(f"- Normal traces covered: {stats['normal_traces_covered']}/{stats['total_normal_traces']}\n")
+                f.write(f"- PageRank score: {stats['pagerank_score']:.6f}\n")
+                f.write("-" * 30 + "\n")
+        
+        return coverage_scores
+
+
+    def analyze_abnormal_coverage_ranking(self, output_file="abnormal_coverage_ranking.txt"):
+        """
+        Sort and analyze operations based on their abnormal coverage score (Oef).
+        Returns sorted operations with their scores and detailed analysis.
+        """
+        # Calculate coverage scores if not already done
+        coverage_scores = self.calculate_operation_coverage_scores()
+        
+        # Sort operations by Oef score
+        sorted_operations = sorted(
+            coverage_scores.items(),
+            key=lambda x: x[1]['Oef'],
+            reverse=True
+        )
+        
+        # Calculate total scores for normalization
+        total_Oef = sum(scores['Oef'] for _, scores in coverage_scores.items())
+        total_Oep = sum(scores['Oep'] for _, scores in coverage_scores.items())
+        
+        # Write analysis to file
+        with open(output_file, 'w') as f:
+            f.write("Operation Ranking by Abnormal Coverage Score (Oef)\n")
+            f.write("=" * 50 + "\n\n")
+            
+            # Write summary statistics
+            f.write("Summary Statistics:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Total number of operations: {len(coverage_scores)}\n")
+            f.write(f"Total Oef score: {total_Oef:.6f}\n")
+            f.write(f"Total Oep score: {total_Oep:.6f}\n\n")
+            
+            # Write detailed ranking
+            f.write("Operation Ranking:\n")
+            f.write("-" * 30 + "\n")
+            
+            for rank, (operation, scores) in enumerate(sorted_operations, 1):
+                stats = scores['coverage_stats']
+                normalized_Oef = scores['Oef'] / total_Oef if total_Oef > 0 else 0
+                
+                f.write(f"\nRank {rank}: {operation}\n")
+                f.write(f"Abnormal Coverage Score (Oef): {scores['Oef']:.6f}\n")
+                f.write(f"Normalized Oef: {normalized_Oef:.6f} ({normalized_Oef*100:.2f}%)\n")
+                f.write(f"Normal Coverage Score (Oep): {scores['Oep']:.6f}\n")
+                f.write(f"Coverage Ratio (Oef/Oep): {scores['Oef']/scores['Oep']:.6f} if scores['Oep'] > 0 else 'inf'\n")
+                
+                # Coverage statistics
+                abnormal_coverage_pct = (stats['abnormal_traces_covered'] / stats['total_abnormal_traces'] * 100 
+                                    if stats['total_abnormal_traces'] > 0 else 0)
+                normal_coverage_pct = (stats['normal_traces_covered'] / stats['total_normal_traces'] * 100 
+                                    if stats['total_normal_traces'] > 0 else 0)
+                
+                f.write("\nCoverage Statistics:\n")
+                f.write(f"- Abnormal traces: {stats['abnormal_traces_covered']}/{stats['total_abnormal_traces']} ")
+                f.write(f"({abnormal_coverage_pct:.2f}%)\n")
+                f.write(f"- Normal traces: {stats['normal_traces_covered']}/{stats['total_normal_traces']} ")
+                f.write(f"({normal_coverage_pct:.2f}%)\n")
+                f.write(f"- PageRank score: {stats['pagerank_score']:.6f}\n")
+                f.write("-" * 30 + "\n")
+
+                
+            # Write top N summary
+            top_n_values = [5, 10, 20]
+            f.write("\nTop-N Analysis:\n")
+            f.write("-" * 30 + "\n")
+                
+            for n in top_n_values:
+                top_n_Oef = sum(scores['Oef'] for _, scores in sorted_operations[:n])
+                top_n_Oef_pct = (top_n_Oef / total_Oef * 100) if total_Oef > 0 else 0
+                    
+                f.write(f"\nTop {n} operations:\n")
+                f.write(f"- Combined Oef score: {top_n_Oef:.6f}\n")
+                f.write(f"- Percentage of total Oef: {top_n_Oef_pct:.2f}%\n")
+                f.write(f"- Operations: {', '.join(op for op, _ in sorted_operations[:n])}\n")
+            
+            # Return sorted operations with their scores
+        return sorted_operations
+
+
+
+    def get_top_abnormal_operations(self, n=10):
+        """
+        Get the top N operations with highest abnormal coverage scores.
+        
+        Parameters:
+            n (int): Number of top operations to return
+        
+        Returns:
+            List of tuples (operation_name, scores)
+        """
+        sorted_operations = self.analyze_abnormal_coverage_ranking()
+        return sorted_operations[:n]
+
+
+
+
+    def find_lowest_level_operations(self, output_file="lowest_level_operations.txt"):
+        """
+        Find operations that appear at the lowest level in parent-child relationships
+        within critical paths across all traces.
+        """
+        # Dictionary to store level information for each operation
+        operation_levels = {}
+        lowest_level_ops = {}
+
+        # Analyze each trace's critical path
+        for trace_name, analysis in self.all_traces_info.items():
+            # Create a dictionary to track parent-child relationships
+            parent_child_map = {}
+            
+            # Build parent-child relationships from span info
+            for span_id, span_info in analysis['span_info'].items():
+                if span_info['parent_span_id']:
+                    parent_child_map[span_id] = span_info['parent_span_id']
+            
+            # Find operations in critical path and their levels
+            for span in analysis['critical_path']:
+                operation_name = span['operation_name']
+                span_id = span['span_id']
+                
+                # Calculate level by traversing up the parent chain
+                level = 0
+                current_span_id = span_id
+                while current_span_id in parent_child_map:
+                    level += 1
+                    current_span_id = parent_child_map[current_span_id]
+                
+                # Update operation levels
+                if operation_name not in operation_levels:
+                    operation_levels[operation_name] = {'max_level': level, 'occurrences': 1}
+                else:
+                    operation_levels[operation_name]['occurrences'] += 1
+                    operation_levels[operation_name]['max_level'] = max(
+                        operation_levels[operation_name]['max_level'], 
+                        level
+                    )
+                
+                # If this is an abnormal trace, track additional information
+                if any(trace['trace_name'] == trace_name for trace in self.abnormal_traces):
+                    if operation_name not in lowest_level_ops:
+                        lowest_level_ops[operation_name] = {
+                            'abnormal_occurrences': 1,
+                            'normal_occurrences': 0,
+                            'traces': [trace_name]
+                        }
+                    else:
+                        lowest_level_ops[operation_name]['abnormal_occurrences'] += 1
+                        lowest_level_ops[operation_name]['traces'].append(trace_name)
+                else:
+                    if operation_name not in lowest_level_ops:
+                        lowest_level_ops[operation_name] = {
+                            'abnormal_occurrences': 0,
+                            'normal_occurrences': 1,
+                            'traces': [trace_name]
+                        }
+                    else:
+                        lowest_level_ops[operation_name]['normal_occurrences'] += 1
+                        lowest_level_ops[operation_name]['traces'].append(trace_name)
+
+            # Find operations that appear at the lowest level
+        max_level = max(info['max_level'] for info in operation_levels.values())
+        lowest_level_operations = {
+            op: info for op, info in operation_levels.items() 
+            if info['max_level'] == max_level
+        }
+
+        # Write analysis to file
+        with open(output_file, 'w') as f:
+            f.write("Lowest Level Operations Analysis\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write(f"Maximum depth level found: {max_level}\n\n")
+            
+            f.write("Operations at the lowest level:\n")
+            f.write("-" * 30 + "\n")
+            
+            # Sort operations by number of occurrences
+            sorted_ops = sorted(
+                lowest_level_operations.items(),
+                key=lambda x: x[1]['occurrences'],
+                reverse=True
+            )
+            
+            for op_name, info in sorted_ops:
+                f.write(f"\nOperation: {op_name}\n")
+                f.write(f"Occurrences: {info['occurrences']}\n")
+                
+                if op_name in lowest_level_ops:
+                    op_stats = lowest_level_ops[op_name]
+                    total_traces = op_stats['abnormal_occurrences'] + op_stats['normal_occurrences']
+                    abnormal_percentage = (op_stats['abnormal_occurrences'] / total_traces * 100 
+                                        if total_traces > 0 else 0)
+                    
+                    f.write(f"Abnormal trace occurrences: {op_stats['abnormal_occurrences']}\n")
+                    f.write(f"Normal trace occurrences: {op_stats['normal_occurrences']}\n")
+                    f.write(f"Percentage in abnormal traces: {abnormal_percentage:.2f}%\n")
+                    f.write("Traces containing this operation:\n")
+                    for trace in op_stats['traces']:
+                        trace_type = "ABNORMAL" if any(t['trace_name'] == trace 
+                                                    for t in self.abnormal_traces) else "normal"
+                        f.write(f"- {trace} [{trace_type}]\n")
+                
+                f.write("-" * 30 + "\n")
+                
+            # Write summary statistics
+            f.write("\nSummary Statistics:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Total number of lowest level operations: {len(lowest_level_operations)}\n")
+            total_occurrences = sum(info['occurrences'] for info in lowest_level_operations.values())
+            f.write(f"Total occurrences of lowest level operations: {total_occurrences}\n")
+            
+            # Calculate percentage of abnormal traces containing each operation
+            if self.abnormal_traces:
+                f.write("\nAbnormal Trace Coverage:\n")
+                for op_name in lowest_level_operations:
+                    if op_name in lowest_level_ops:
+                        abnormal_count = lowest_level_ops[op_name]['abnormal_occurrences']
+                        coverage_pct = (abnormal_count / len(self.abnormal_traces) * 100)
+                        f.write(f"{op_name}: {coverage_pct:.2f}% of abnormal traces\n")
+
+        return {
+            'max_level': max_level,
+            'lowest_level_operations': lowest_level_operations,
+            'operation_stats': lowest_level_ops
+        }
+
 def main():
     analyzer = TraceAnalyzer()
     
@@ -1170,6 +1487,42 @@ def main():
         if i >= 10:
             break
         print(f"{node}: {rank:.6f}")
+
+    
+    # Calculate operation coverage scores
+    coverage_scores = analyzer.calculate_operation_coverage_scores()
+    print("\nOperation coverage scores have been written to operation_coverage_scores.txt")
+    
+    # Print top operations by abnormal coverage score (Oef)
+    print("\nTop Operations by Abnormal Coverage Score (Oef):")
+    sorted_ops = sorted(coverage_scores.items(), 
+                       key=lambda x: x[1]['Oef'], 
+                       reverse=True)
+    for i, (operation, scores) in enumerate(sorted_ops[:10]):
+        print(f"{operation}: {scores['Oef']:.6f}")
+
+    
+    # Analyze and rank operations by abnormal coverage
+    sorted_operations = analyzer.analyze_abnormal_coverage_ranking()
+    print("\nOperation ranking has been written to abnormal_coverage_ranking.txt")
+    
+    # Print top 10 operations
+    print("\nTop 10 Operations by Abnormal Coverage Score (Oef):")
+    for rank, (operation, scores) in enumerate(sorted_operations[:10], 1):
+        print(f"{rank}. {operation}: {scores['Oef']:.6f}")
+        print(f"   Abnormal traces covered: {scores['coverage_stats']['abnormal_traces_covered']}/")
+        print(f"   {scores['coverage_stats']['total_abnormal_traces']}")
+
+
+    # Find and analyze lowest level operations
+    lowest_level_results = analyzer.find_lowest_level_operations()
+    print("\nLowest level operations analysis has been written to lowest_level_operations.txt")
+    
+    # Print summary of lowest level operations
+    print(f"\nFound {len(lowest_level_results['lowest_level_operations'])} operations at level {lowest_level_results['max_level']}:")
+    for op_name, info in lowest_level_results['lowest_level_operations'].items():
+        print(f"- {op_name}: {info['occurrences']} occurrences")
+
 
 if __name__ == "__main__":
     main() 
