@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple
 import numpy as np
+import csv
 
 class SpanInfo:
     def __init__(self, span_id, operation_name, start_time, duration, parent_span_id=None):
@@ -248,11 +249,13 @@ class TraceAnalyzer:
         return groups
 
 
-
     def write_critical_paths_to_file(self, output_file="critical_paths.txt"):
         """Write critical paths to a file, grouping similar paths together and including expected and actual latencies"""
         groups = self.group_similar_critical_paths()
         abnormal_traces = []  # List to store abnormal trace information
+        
+        # Create a separate file for abnormal traces list
+        abnormal_traces_file = "abnormal_traces_list.txt"
         
         with open(output_file, 'w') as f:
             for group_id, (signature, group_data) in enumerate(groups.items(), 1):
@@ -285,10 +288,8 @@ class TraceAnalyzer:
                     abnormal_traces.extend(group_abnormal_traces)
                 
                 f.write("\n")
-        
-        # Write a summary of all abnormal traces at the end of the file
-        if abnormal_traces:
-            with open(output_file, 'a') as f:
+                # Write a summary of all abnormal traces at the end of the file
+            if abnormal_traces:
                 f.write("\n" + "="*50 + "\n")
                 f.write("SUMMARY OF ABNORMAL TRACES\n")
                 f.write("="*50 + "\n\n")
@@ -306,9 +307,22 @@ class TraceAnalyzer:
                     f.write(f"Excess Latency: {trace['difference']:.2f}ms\n")
                     f.write("-"*40 + "\n")
         
+        # Write abnormal traces to JSON file
+        with open(abnormal_traces_file, 'w') as f:
+            json.dump({
+                'total_abnormal_traces': len(abnormal_traces),
+                'traces': abnormal_traces,
+                'statistics': {
+                    'avg_excess': sum(t['difference'] for t in abnormal_traces) / len(abnormal_traces) if abnormal_traces else 0,
+                    'max_excess': max(t['difference'] for t in abnormal_traces) if abnormal_traces else 0,
+                    'min_excess': min(t['difference'] for t in abnormal_traces) if abnormal_traces else 0
+                }
+            }, f, indent=2)
+        
         # Store abnormal traces as a property of the class
         self.abnormal_traces = abnormal_traces
         return abnormal_traces
+    
 
     def read_json_file(self, file_path):
         """Read and parse a single JSON file."""
@@ -1376,12 +1390,361 @@ class TraceAnalyzer:
             'lowest_level_operations': lowest_level_operations,
             'operation_stats': lowest_level_ops
         }
+    
+
+def convert_csv_to_json(csv_file_path, output_dir):
+        """Convert a CSV trace file to JSON format."""
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Get the input filename without extension
+        base_filename = os.path.splitext(os.path.basename(csv_file_path))[0]
+        
+        # Initialize the JSON structure
+        result = {
+            "data": [
+                {
+                    "spans": [],
+                    "processes": {},
+                    "warnings": None
+                }
+            ],
+            "total": 0,
+            "limit": 0,
+            "offset": 0,
+            "errors": None
+        }
+
+        # Track process IDs and their services
+        processes = {}
+        process_counter = 1
+
+        # First pass: Read all spans and assign process IDs
+        with open(csv_file_path, 'r') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                service_name = row['PodName']
+                if service_name not in processes:
+                    process_id = f"p{process_counter}"
+                    processes[service_name] = {
+                        "processID": process_id,
+                        "serviceName": service_name,
+                        "tags": [
+                            {
+                                "key": "service.namespace",
+                                "type": "string",
+                                "value": "opentelemetry-demo"
+                            }
+                        ]
+                    }
+                    process_counter += 1
+
+                # Extract operation details
+                operation_parts = row['OperationName'].split('/')
+                service = operation_parts[0] if len(operation_parts) > 0 else row['OperationName']
+                method = operation_parts[1] if len(operation_parts) > 1 else ""
+
+                # Create span object with all required fields
+                span = {
+                    "traceID": row['TraceID'],
+                    "spanID": row['SpanID'],
+                    "operationName": row['OperationName'],
+                    "references": [] if row['ParentID'].lower() == 'root' else [
+                        {
+                            "refType": "CHILD_OF",
+                            "traceID": row['TraceID'],
+                            "spanID": row['ParentID']
+                        }
+                    ],
+                    "startTime": int(row['StartTimeUnixNano']),
+                    "duration": int(row['Duration']),
+                    "tags": [
+                        {
+                            "key": "rpc.system",
+                            "type": "string",
+                            "value": "grpc"
+                        },
+                        {
+                            "key": "rpc.service",
+                            "type": "string",
+                            "value": f"oteldemo.{service}"
+                        },
+                        {
+                            "key": "rpc.method",
+                            "type": "string",
+                            "value": method
+                        },
+                        {
+                            "key": "rpc.grpc.status_code",
+                            "type": "int64",
+                            "value": 0
+                        },
+                        {
+                            "key": "span.kind",
+                            "type": "string",
+                            "value": "server"
+                        },
+                        {
+                            "key": "otel.status_code",
+                            "type": "string",
+                            "value": "OK"
+                        },
+                        {
+                            "key": "internal.span.format",
+                            "type": "string",
+                            "value": "otlp"
+                        }
+                    ],
+                    "logs": [
+                        {
+                            "timestamp": int(row['StartTimeUnixNano']),
+                            "fields": [
+                                {
+                                    "key": "event",
+                                    "type": "string",
+                                    "value": f"Processing {row['OperationName']} request"
+                                }
+                            ]
+                        },
+                        {
+                            "timestamp": int(row['StartTimeUnixNano']) + int(row['Duration']),
+                            "fields": [
+                                {
+                                    "key": "event",
+                                    "type": "string",
+                                    "value": "Operation completed successfully"
+                                }
+                            ]
+                        }
+                    ],
+                    "processID": processes[service_name]["processID"],
+                    "warnings": None
+                }
+
+                # Add service-specific tags if available
+                if 'currency' in row['OperationName'].lower():
+                    span["tags"].extend([
+                        {
+                            "key": "app.currency.conversion.from",
+                            "type": "string",
+                            "value": "USD"
+                        },
+                        {
+                            "key": "app.currency.conversion.to",
+                            "type": "string",
+                            "value": "USD"
+                        }
+                    ])
+
+                result["data"][0]["spans"].append(span)
+
+        # Add processes to the result
+        result["data"][0]["processes"] = {
+            proc_info["processID"]: {
+                "serviceName": proc_info["serviceName"],
+                "tags": proc_info["tags"]
+            }
+            for proc_info in processes.values()
+        }
+
+        # Write to JSON file with the same name as input file
+        output_file = os.path.join(output_dir, f'{base_filename}.json')
+        with open(output_file, 'w') as jsonfile:
+            json.dump(result, jsonfile, indent=2)
+
+def process_directory_backup(input_dir, output_dir):
+        """Process all CSV files in the input directory."""
+        # Get all CSV files in the input directory
+        csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+        
+        for csv_file in csv_files:
+            print(f"Processing {csv_file}...")
+            convert_csv_to_json(csv_file, output_dir)
+            print(f"Completed processing {csv_file}")
+
+
+def process_directory(input_dir, output_dir):
+    """Process all CSV files in the input directory and create separate JSON files for each trace."""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get all CSV files in the input directory
+    csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+    
+    for csv_file in csv_files:
+        print(f"Processing {csv_file}...")
+        
+        # Dictionary to store traces grouped by trace ID
+        traces_by_id = {}
+        
+        # Read CSV and group spans by trace ID
+        with open(csv_file, 'r') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                trace_id = row['TraceID']
+                if trace_id not in traces_by_id:
+                    traces_by_id[trace_id] = {
+                        "data": [
+                            {
+                                "traceID": trace_id,  # Added traceID at data level
+                                "spans": [],
+                                "processes": {},
+                                "warnings": None
+                            }
+                        ],
+                        "total": 1,  # Updated from 0
+                        "limit": 0,
+                        "offset": 0,
+                        "errors": None
+                    }
+                
+                # Track processes for this trace
+                service_name = row['PodName']
+                processes = traces_by_id[trace_id]["data"][0]["processes"]
+                
+                if service_name not in processes:
+                    process_id = f"p{len(processes) + 1}"
+                    processes[process_id] = {
+                        "serviceName": service_name,
+                        "tags": [
+                            {
+                                "key": "service.namespace",
+                                "type": "string",
+                                "value": "opentelemetry-demo"
+                            },
+                            {  # Added additional process tags
+                                "key": "service.name",
+                                "type": "string",
+                                "value": service_name
+                            },
+                            {
+                                "key": "telemetry.sdk.language",
+                                "type": "string",
+                                "value": "go"
+                            }
+                        ]
+                    }
+                
+                # Find process ID for this span
+                process_id = next(pid for pid, p in processes.items() 
+                                if p["serviceName"] == service_name)
+                
+                # Extract operation details
+                operation_parts = row['OperationName'].split('/')
+                service = operation_parts[0] if len(operation_parts) > 0 else row['OperationName']
+                method = operation_parts[1] if len(operation_parts) > 1 else ""
+                
+                # Create span object
+                span = {
+                    "traceID": trace_id,
+                    "spanID": row['SpanID'],
+                    "flags": 1,  # Added flags field
+                    "operationName": row['OperationName'],
+                    "references": [] if row['ParentID'].lower() == 'root' else [
+                        {
+                            "refType": "CHILD_OF",
+                            "traceID": trace_id,
+                            "spanID": row['ParentID']
+                        }
+                    ],
+                    "startTime": int(row['StartTimeUnixNano']),
+                    "duration": int(row['Duration']),
+                    "tags": [
+                        {
+                            "key": "rpc.system",
+                            "type": "string",
+                            "value": "grpc"
+                        },
+                        {
+                            "key": "rpc.service",
+                            "type": "string",
+                            "value": f"oteldemo.{service}"
+                        },
+                        {
+                            "key": "rpc.method",
+                            "type": "string",
+                            "value": method
+                        },
+                        {
+                            "key": "rpc.grpc.status_code",
+                            "type": "int64",
+                            "value": 0
+                        },
+                        {
+                            "key": "span.kind",
+                            "type": "string",
+                            "value": "server"
+                        },
+                        {
+                            "key": "otel.status_code",
+                            "type": "string",
+                            "value": "OK"
+                        },
+                        {
+                            "key": "internal.span.format",
+                            "type": "string",
+                            "value": "proto"  # Changed from "otlp" to "proto"
+                        }
+                    ],
+                    "logs": [
+                        {
+                            "timestamp": int(row['StartTimeUnixNano']),
+                            "fields": [
+                                {
+                                    "key": "event",
+                                    "type": "string",
+                                    "value": f"Processing {row['OperationName']} request"
+                                }
+                            ]
+                        },
+                        {
+                            "timestamp": int(row['StartTimeUnixNano']) + int(row['Duration']),
+                            "fields": [
+                                {
+                                    "key": "event",
+                                    "type": "string",
+                                    "value": "Operation completed successfully"
+                                }
+                            ]
+                        }
+                    ],
+                    "processID": process_id,
+                    "warnings": None
+                }
+                
+                # Add service-specific tags if needed
+                if 'currency' in row['OperationName'].lower():
+                    span["tags"].extend([
+                        {
+                            "key": "app.currency.conversion.from",
+                            "type": "string",
+                            "value": "USD"
+                        },
+                        {
+                            "key": "app.currency.conversion.to",
+                            "type": "string",
+                            "value": "USD"
+                        }
+                    ])
+                
+                traces_by_id[trace_id]["data"][0]["spans"].append(span)
+        
+        # Write each trace to a separate JSON file
+        base_filename = os.path.splitext(os.path.basename(csv_file))[0]
+        for trace_id, trace_data in traces_by_id.items():
+            output_file = os.path.join(output_dir, f'{base_filename}_{trace_id}.json')
+            with open(output_file, 'w') as jsonfile:
+                json.dump(trace_data, jsonfile, indent=2)
+        
+        print(f"Created {len(traces_by_id)} trace files from {csv_file}")
+
 
 def main():
     analyzer = TraceAnalyzer()
     
     # Get current working directory
     current_dir = os.getcwd()
+
     
     # Create output directory if it doesn't exist
     output_dir = os.path.join(current_dir, "analysis_output")
@@ -1390,10 +1753,21 @@ def main():
     
     # Define a single output file for all analysis results
     output_file = os.path.join(output_dir, "trace_analysis_results.txt")
+
+    #----------------------------------------
+    # Define input and output directories
+    input_dir = directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/nezha/8276375/yuxiaoba/Nezha-v0.1/yuxiaoba-Nezha-b0dc1c4/rca_data/2022-08-22/trace"
+    output_dir = directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/nezha/8276375/yuxiaoba/Nezha-v0.1/yuxiaoba-Nezha-b0dc1c4/rca_data/2022-08-22/trace-out_3"
+    
+    # Process all CSV files
+    #process_directory(input_dir, output_dir)
+    print("\nConversion completed successfully!")
+    #----------------------------------------
     
     # Input directory path
-    directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/article/article-3"
+    directory_path = r"/home/maryam/Poly/Dorsal/traces/dataset/nezha/8276375/yuxiaoba/Nezha-v0.1/yuxiaoba-Nezha-b0dc1c4/rca_data/2022-08-22/test"
     results = analyzer.analyze_all_traces(directory_path)
+
     
     # Write all analysis results to the same file
     with open(output_file, 'w') as f:
